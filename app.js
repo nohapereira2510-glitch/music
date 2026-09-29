@@ -150,6 +150,10 @@ async function api(path, { method = 'GET', body, base = API_BASE, key = state.ke
   }
   let json = null;
   try { json = await res.json(); } catch { /* non-JSON */ }
+  if (!json) {
+    throw new ApiError(res.status === 200 ? 502 : res.status,
+      HOSTED ? 'The site could not reach the Suno API through Netlify. Check that netlify.toml was deployed.' : `Unexpected response (${res.status}).`);
+  }
   const code = json?.code ?? res.status;
   if (!res.ok || (json && json.code !== undefined && json.code !== 200) || json?.success === false) {
     throw new ApiError(code === 200 ? res.status : code, json?.msg);
@@ -169,9 +173,22 @@ async function uploadFile(file) {
   return data.downloadUrl;
 }
 
+// The docs list two paths for the credit balance; try both.
+async function getCredits(key = state.key) {
+  try {
+    return await api('/api/v1/generate/credit', { key });
+  } catch (err) {
+    if (err.code === 404) return api('/api/v1/get-credits', { key });
+    throw err;
+  }
+}
+
+// Accept keys pasted as "Bearer xyz", in quotes, or with stray spaces.
+const cleanKey = (raw) => raw.trim().replace(/^bearer\s+/i, '').replace(/^["'`]+|["'`]+$/g, '').replace(/\s+/g, '');
+
 async function refreshCredits() {
   try {
-    const c = await api('/api/v1/generate/credit');
+    const c = await getCredits();
     const n = typeof c === 'object' && c !== null ? (c.credits ?? c.balance ?? JSON.stringify(c)) : c;
     $('#credits-val').textContent = typeof n === 'number' ? n.toLocaleString() : n;
     return n;
@@ -219,6 +236,16 @@ function lock(message = '') {
   showGate(message);
 }
 
+function gateError(err) {
+  if (err.code === 401) {
+    return 'Suno rejected this key (error 401). Keys are case-sensitive: copy it again from sunoapi.org/api-key, or reset it there if it was shared.';
+  }
+  if (err.code === 0 && !HOSTED) {
+    return 'Your browser blocked the request because the page is opened from your computer. Open your Netlify site instead (or run "npx netlify-cli dev").';
+  }
+  return `${err.message}${err.code ? ` (error ${err.code})` : ''}`;
+}
+
 function initGate() {
   $('#key-toggle').addEventListener('click', () => {
     const i = $('#key-input');
@@ -226,14 +253,14 @@ function initGate() {
   });
   $('#key-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const key = $('#key-input').value.trim();
+    const key = cleanKey($('#key-input').value);
     if (!key) return;
     const btn = $('#key-submit');
     btn.disabled = true;
     btn.textContent = 'Checking your key…';
     $('#key-error').textContent = '';
     try {
-      await api('/api/v1/generate/credit', { key });
+      await getCredits(key);
       state.key = key;
       const remember = $('#key-remember').checked;
       store.del('hm-key');
@@ -242,7 +269,7 @@ function initGate() {
       showApp();
       toast('Welcome to the studio! 🎶', 'ok');
     } catch (err) {
-      $('#key-error').textContent = err.code === 401 ? 'That key did not work. Double-check it and try again.' : err.message;
+      $('#key-error').textContent = gateError(err);
     } finally {
       btn.disabled = false;
       btn.textContent = 'Unlock the studio →';
